@@ -55,8 +55,6 @@ struct SharedState<void> {
 template<typename T, typename Executor>
 class Promise {
 private:
-    static_assert(std::is_copy_constructible_v<T>, "T must be copy constructible");
-
     std::shared_ptr<SharedState<T>> state_;
     std::shared_ptr<Executor> executor_;
 
