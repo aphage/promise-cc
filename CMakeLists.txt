@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(PROMISE_CC_BUILD_TESTS "Build tests" OFF)
 
 project(promise-cc
-VERSION 0.0.1
+VERSION 0.0.2
 DESCRIPTION "C++ promise, like JavaScript"
 LANGUAGES C CXX
 )
@@ -18,8 +18,8 @@ target_include_directories(${PROJECT_NAME} INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}
 add_library(promise-cc::promise ALIAS ${PROJECT_NAME})
 
 configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/include/promise/macros.h.in
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/include/promise/macros.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/include/promise/version.h.in
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/include/promise/version.h
 )
 
 if(PROMISE_CC_BUILD_TESTS)

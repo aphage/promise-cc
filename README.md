@@ -31,18 +31,20 @@ Ready for your first spell? 🪄 Just whisper the magic words by including the h
 
 And here's a little piece of magic to get you started!
 ```cpp
-using promise::Promise;
+using promise::usePromise;
 
-std::make_shared<Promise<int, Async>>([](auto resolve, auto reject) {
-    // A little gift for you~
+usePromise<int>([](auto resolve, auto reject) {
     resolve(42);
-})->then<int>([](auto v) {
-    // And then, something wonderful happens!
+}, std::make_shared<ExecutorAsync>())->then([&](auto v) -> int {
     SPDLOG_INFO("resolved with {}", v);
+
     return v * 2;
-})->then([](auto v) {
-    // And the story continues...
+})->then([&](auto v) -> std::optional<int> {
     SPDLOG_INFO("resolved with {}", v);
+
+    return std::nullopt;
+})->then([&](const auto& v) {
+    SPDLOG_INFO("resolved with {}", v.value_or(-1));
 });
 ```
 

@@ -1,0 +1,7 @@
+#pragma once
+
+#define PROMISE_VERSION_MAJOR 0
+#define PROMISE_VERSION_MINOR 0
+#define PROMISE_VERSION_PATCH 2
+
+#define PROMISE_VERSION "0.0.2"
