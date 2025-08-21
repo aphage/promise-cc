@@ -26,7 +26,7 @@ ctest --test-dir out/build/x64-debug
 ## 🚀 Quick Start 🚀
 Ready for your first spell? 🪄 Just whisper the magic words by including the header:
 ```cpp
-#include <promise/promise.h>
+#include <promise/promise.hpp>
 ```
 
 And here's a little piece of magic to get you started!
