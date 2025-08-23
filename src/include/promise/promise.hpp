@@ -179,8 +179,8 @@ public:
                         if constexpr (std::is_void_v<RejType>) {
                             onRejected(*state->exception);
 
-                            // RejectedFn returns void, you need to throw an exception
-                            throw std::runtime_error("RejectedFn returns void, you need to throw an exception");
+                            //When RejectedFn returns void, you need to throw an exception
+                            throw std::runtime_error("When RejectedFn returns void, you need to throw an exception");
                         } else {
                             static_assert(std::is_same_v<NextT, RejType>, "FulfilledFn and RejectedFn must be the same type");
                             NextT value = onRejected(*state->exception);
@@ -241,8 +241,8 @@ public:
                         if constexpr (std::is_void_v<RejType>) {
                             onRejected(*state->exception);
 
-                            // RejectedFn returns void, you need to throw an exception
-                            throw std::runtime_error("RejectedFn returns void, you need to throw an exception");
+                            //When RejectedFn returns void, you need to throw an exception
+                            throw std::runtime_error("When RejectedFn returns void, you need to throw an exception");
                         } else {
                             static_assert(std::is_same_v<NextT, RejType>, "FulfilledFn and RejectedFn must be the same type");
                             NextT value = onRejected(*state->exception);
