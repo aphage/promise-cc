@@ -12,101 +12,89 @@
 
 namespace promise {
 
+namespace internal {
+
 enum class PromiseState {
     PENDING,
     FULFILLED,
     REJECTED
 };
 
+
+template<typename Executor>
 struct SharedStateBase {
+    SharedStateBase(Executor executor) : executor(std::move(executor)) {}
+
     std::mutex mtx;
     PromiseState state = PromiseState::PENDING;
     std::optional<std::exception_ptr> exception;
     std::vector<std::function<void()>> callbacks;
+    Executor executor;
 
-    inline void trigger_callbacks() {
-        for (const auto& callback : callbacks) {
-            callback();
+    inline void trigger_callbacks(std::vector<std::function<void()>>& callbacks) {
+        for (auto& callback : callbacks) {
+            executor(std::move(callback));
         }
-        callbacks.clear();
     }
 };
 
-template<typename T>
-struct SharedState : SharedStateBase {
+template<typename T, typename Executor>
+struct SharedState : SharedStateBase<Executor> {
+    SharedState(Executor executor) : SharedStateBase<Executor>(std::forward<Executor>(executor)) {}
+
     std::optional<T> value;
 };
 
-template<>
-struct SharedState<void> : SharedStateBase {
+template<typename Executor>
+struct SharedState<void, Executor> : SharedStateBase<Executor> {
+    SharedState(Executor executor) : SharedStateBase<Executor>(std::forward<Executor>(executor)) {}
 };
 
 template<typename T, typename Executor>
 class Promise {
+    static_assert(std::is_invocable_v<Executor, std::function<void()>>, "Executor must be invocable with std::function<void()>");
 private:
-    std::shared_ptr<SharedState<T>> state_;
-    std::shared_ptr<Executor> executor_;
+    using SharedStatePtr = std::shared_ptr<SharedState<T, Executor>>;
+
+    SharedStatePtr _state;
 
     template<typename, typename>
     friend class Promise;
     
-    explicit Promise(std::shared_ptr<SharedState<T>> state, std::shared_ptr<Executor> executor)
-        : state_(std::move(state)), executor_(std::move(executor)) {}
+    explicit Promise(SharedStatePtr state)
+        : _state(std::move(state)) {}
+    
 public:
     template<typename Task>
     explicit Promise(
         Task task,
-        std::shared_ptr<Executor> executor = std::make_shared<Executor>()
-    ) {
-        assert(executor != nullptr);
-        state_ = std::make_shared<SharedState<T>>();
-        executor_ = std::move(executor);
+        Executor executor
+    ) : _state(std::make_shared<SharedState<T, Executor>>(std::forward<Executor>(executor))) {
 
-        auto reject = [state = this->state_](std::exception_ptr e) {
-            std::unique_lock<std::mutex> lock(state->mtx);
-            
-            assert(state->state == PromiseState::PENDING);
-
-            state->state = PromiseState::REJECTED;
-            state->exception = e;
-            state->trigger_callbacks();
+        auto reject = [state = this->_state](std::exception_ptr e) {
+            std::vector<std::function<void()>> callbacks;
+            {
+                std::lock_guard<std::mutex> lock(state->mtx);
+                assert(state->state == PromiseState::PENDING);
+                state->state = PromiseState::REJECTED;
+                state->exception = e;
+                state->callbacks.swap(callbacks);
+            }
+            state->trigger_callbacks(callbacks);
         };
 
         using reject_t = decltype(reject);
 
         if constexpr (std::is_void_v<T>) {
-            auto resolve = [state = this->state_]() {
-                std::unique_lock<std::mutex> lock(state->mtx);
-                
-                assert(state->state == PromiseState::PENDING);
-
-                state->state = PromiseState::FULFILLED;
-                state->trigger_callbacks();
-            };
-
-            using resolve_t = decltype(resolve);
-            static_assert(std::is_invocable_r_v<void, Task, resolve_t, reject_t>, "Task must be invocable with resolve() and reject(exception_ptr), and return void");
-
-            auto callback = [t = std::move(task), res = std::move(resolve), rej = std::move(reject)]() {
-                try {
-                    t(res, rej);
-                } catch (...) {
-                    rej(std::current_exception());
+            auto resolve = [state = this->_state]() {
+                std::vector<std::function<void()>> callbacks;
+                {
+                    std::lock_guard<std::mutex> lock(state->mtx);
+                    assert(state->state == PromiseState::PENDING);
+                    state->state = PromiseState::FULFILLED;
+                    state->callbacks.swap(callbacks);
                 }
-            };
-
-            static_assert(std::is_invocable_v<Executor, decltype(callback)>, "Executor must be invocable with callback()");
-
-            (*executor_)(std::move(callback));
-        } else {
-            auto resolve = [state = this->state_](T value) {
-                std::unique_lock<std::mutex> lock(state->mtx);
-                
-                assert(state->state == PromiseState::PENDING);
-
-                state->state = PromiseState::FULFILLED;
-                state->value = std::move(value);
-                state->trigger_callbacks();
+                state->trigger_callbacks(callbacks);
             };
 
             using resolve_t = decltype(resolve);
@@ -120,9 +108,35 @@ public:
                 }
             };
 
+            _state->executor(std::move(callback));
             static_assert(std::is_invocable_v<Executor, decltype(callback)>, "Executor must be invocable with callback()");
+        } else {
+            auto resolve = [state = this->_state](T value) {
+                std::vector<std::function<void()>> callbacks;
+                {
+                    std::lock_guard<std::mutex> lock(state->mtx);
+                    assert(state->state == PromiseState::PENDING);
+                    state->state = PromiseState::FULFILLED;
+                    state->value = std::move(value);
+                    state->callbacks.swap(callbacks);
+                }
+                state->trigger_callbacks(callbacks);
+            };
+
             
-            (*executor_)(std::move(callback));
+            using resolve_t = decltype(resolve);
+            static_assert(std::is_invocable_r_v<void, Task, resolve_t, reject_t>, "Task must be invocable with resolve(value) and reject(exception_ptr), and return void");
+
+            auto callback = [t = std::move(task), res = std::move(resolve), rej = std::move(reject)]() {
+                try {
+                    t(res, rej);
+                } catch (...) {
+                    rej(std::current_exception());
+                }
+            };
+
+            _state->executor(std::move(callback));
+            static_assert(std::is_invocable_v<Executor, decltype(callback)>, "Executor must be invocable with callback()");
         }
     }
 
@@ -134,235 +148,284 @@ public:
         FulfilledFn onFulfilled,
         RejectedFn onRejected
     ) {
-
-        static_assert(std::is_invocable_v<RejectedFn, std::exception_ptr>, "RejectedFn must be invocable with exception_ptr");
+        static_assert(std::is_invocable_v<RejectedFn, std::exception_ptr>, "RejectedFn must be invocable with std::exception_ptr");
         if constexpr (std::is_void_v<T>) {
+            using NextT = std::invoke_result_t<FulfilledFn>;
             static_assert(std::is_invocable_v<FulfilledFn>, "FulfilledFn must be invocable");
-        } else {
-            static_assert(std::is_invocable_v<FulfilledFn, T>, "FulfilledFn must be invocable with T");
-        }
+            
+            auto next_promise_state = std::make_shared<SharedState<NextT, Executor>>(_state->executor);
+            auto next_promise = Promise<NextT, Executor>(next_promise_state);
 
-        if constexpr (std::is_void_v<T>) {
-            using RetType = std::invoke_result_t<FulfilledFn>;
-            static_assert(std::is_same_v<RetType, std::invoke_result_t<RejectedFn, std::exception_ptr>>, "RejectedFn must return the same type as FulfilledFn");
-
-            auto next_promise_state = std::make_shared<SharedState<RetType>>();
-            auto next_promise = std::shared_ptr<Promise<RetType, Executor>>(new Promise<RetType, Executor>(next_promise_state, executor_));
-
-            auto callback = [state = this->state_, next_promise_state, onFulfilled = std::move(onFulfilled), onRejected = std::move(onRejected)]() {
+            auto callback = [state = this->_state, next_promise_state, onFulfilled = std::move(onFulfilled), onRejected = std::move(onRejected)] {
+                std::vector<std::function<void()>> callbacks;
                 try {
                     if (state->state == PromiseState::FULFILLED) {
-                        if constexpr (std::is_void_v<RetType>) {
+                        if constexpr (std::is_void_v<NextT>) {
                             onFulfilled();
-                            
-                            std::unique_lock<std::mutex> next_lock(next_promise_state->mtx);
+
+                            std::lock_guard<std::mutex> next_lock(next_promise_state->mtx);
                             next_promise_state->state = PromiseState::FULFILLED;
-                            next_promise_state->trigger_callbacks();
+                            next_promise_state->callbacks.swap(callbacks);
                         } else {
-                            RetType value = onFulfilled();
-                            
-                            std::unique_lock<std::mutex> next_lock(next_promise_state->mtx);
+                            NextT value = onFulfilled();
+
+                            std::lock_guard<std::mutex> next_lock(next_promise_state->mtx);
                             next_promise_state->state = PromiseState::FULFILLED;
                             next_promise_state->value = std::move(value);
-                            next_promise_state->trigger_callbacks();
+                            next_promise_state->callbacks.swap(callbacks);
                         }
                     } else {
-                        if constexpr (std::is_void_v<RetType>) {
+                        using RejType = std::invoke_result_t<RejectedFn, std::exception_ptr>;
+                        if constexpr (std::is_void_v<RejType>) {
                             onRejected(*state->exception);
 
-                            std::unique_lock<std::mutex> next_lock(next_promise_state->mtx);
-                            next_promise_state->state = PromiseState::FULFILLED;
-                            next_promise_state->trigger_callbacks();
+                            // RejectedFn returns void, you need to throw an exception
+                            throw std::runtime_error("RejectedFn returns void, you need to throw an exception");
                         } else {
-                            RetType value = onRejected(*state->exception);
+                            static_assert(std::is_same_v<NextT, RejType>, "FulfilledFn and RejectedFn must be the same type");
+                            NextT value = onRejected(*state->exception);
 
-                            std::unique_lock<std::mutex> next_lock(next_promise_state->mtx);
+                            std::lock_guard<std::mutex> next_lock(next_promise_state->mtx);
                             next_promise_state->state = PromiseState::FULFILLED;
                             next_promise_state->value = std::move(value);
-                            next_promise_state->trigger_callbacks();
+                            next_promise_state->callbacks.swap(callbacks);
                         }
                     }
                 } catch (...) {
-                    std::unique_lock<std::mutex> next_lock(next_promise_state->mtx);
+                    std::lock_guard<std::mutex> next_lock(next_promise_state->mtx);
                     next_promise_state->state = PromiseState::REJECTED;
                     next_promise_state->exception = std::current_exception();
-                    next_promise_state->trigger_callbacks();
+                    next_promise_state->callbacks.swap(callbacks);
                 }
+                
+                next_promise_state->trigger_callbacks(callbacks);
             };
 
             static_assert(std::is_invocable_v<Executor, decltype(callback)>, "Executor must be invocable with callback");
 
-            std::unique_lock<std::mutex> lock(state_->mtx);
-            if (state_->state != PromiseState::PENDING) {
-                (*executor_)(std::move(callback));
+            std::lock_guard<std::mutex> lock(_state->mtx);
+            if (_state->state != PromiseState::PENDING) {
+                _state->executor(std::move(callback));
             } else {
-                state_->callbacks.push_back([executor = std::move(executor_), callback = std::move(callback)]() mutable {
-                    (*executor)(std::move(callback));
-                });
+                _state->callbacks.push_back(std::move(callback));
             }
 
             return next_promise;
         } else {
-            using RetType = std::invoke_result_t<FulfilledFn, T>;
-            static_assert(std::is_same_v<RetType, std::invoke_result_t<RejectedFn, std::exception_ptr>>, "RejectedFn must return the same type as FulfilledFn");
+            using NextT = std::invoke_result_t<FulfilledFn, T>;
+            static_assert(std::is_invocable_v<FulfilledFn, T>, "FulfilledFn must be invocable with T");
 
-            auto next_promise_state = std::make_shared<SharedState<RetType>>();
-            auto next_promise = std::shared_ptr<Promise<RetType, Executor>>(new Promise<RetType, Executor>(next_promise_state, executor_));
+            auto next_promise_state = std::make_shared<SharedState<NextT, Executor>>(_state->executor);
+            auto next_promise = Promise<NextT, Executor>(next_promise_state);
 
-            auto callback = [state = this->state_, next_promise_state, onFulfilled = std::move(onFulfilled), onRejected = std::move(onRejected)]() {
+            auto callback = [state = this->_state, next_promise_state, onFulfilled = std::move(onFulfilled), onRejected = std::move(onRejected)] {
+                std::vector<std::function<void()>> callbacks;
                 try {
                     if (state->state == PromiseState::FULFILLED) {
-                        if constexpr (std::is_void_v<RetType>) {
+                        if constexpr (std::is_void_v<NextT>) {
                             onFulfilled(*state->value);
-                            
-                            std::unique_lock<std::mutex> next_lock(next_promise_state->mtx);
+
+                            std::lock_guard<std::mutex> next_lock(next_promise_state->mtx);
                             next_promise_state->state = PromiseState::FULFILLED;
-                            next_promise_state->trigger_callbacks();
+                            next_promise_state->callbacks.swap(callbacks);
                         } else {
-                            RetType value = onFulfilled(*state->value);
-                            
-                            std::unique_lock<std::mutex> next_lock(next_promise_state->mtx);
+                            NextT value = onFulfilled(*state->value);
+
+                            std::lock_guard<std::mutex> next_lock(next_promise_state->mtx);
                             next_promise_state->state = PromiseState::FULFILLED;
                             next_promise_state->value = std::move(value);
-                            next_promise_state->trigger_callbacks();
+                            next_promise_state->callbacks.swap(callbacks);
                         }
                     } else {
-                        if constexpr (std::is_void_v<RetType>) {
+                        using RejType = std::invoke_result_t<RejectedFn, std::exception_ptr>;
+                        if constexpr (std::is_void_v<RejType>) {
                             onRejected(*state->exception);
 
-                            std::unique_lock<std::mutex> next_lock(next_promise_state->mtx);
-                            next_promise_state->state = PromiseState::FULFILLED;
-                            next_promise_state->trigger_callbacks();
+                            // RejectedFn returns void, you need to throw an exception
+                            throw std::runtime_error("RejectedFn returns void, you need to throw an exception");
                         } else {
-                            RetType value = onRejected(*state->exception);
+                            static_assert(std::is_same_v<NextT, RejType>, "FulfilledFn and RejectedFn must be the same type");
+                            NextT value = onRejected(*state->exception);
 
-                            std::unique_lock<std::mutex> next_lock(next_promise_state->mtx);
+                            std::lock_guard<std::mutex> next_lock(next_promise_state->mtx);
                             next_promise_state->state = PromiseState::FULFILLED;
                             next_promise_state->value = std::move(value);
-                            next_promise_state->trigger_callbacks();
+                            next_promise_state->callbacks.swap(callbacks);
                         }
                     }
                 } catch (...) {
-                    std::unique_lock<std::mutex> next_lock(next_promise_state->mtx);
+                    std::lock_guard<std::mutex> next_lock(next_promise_state->mtx);
                     next_promise_state->state = PromiseState::REJECTED;
                     next_promise_state->exception = std::current_exception();
-                    next_promise_state->trigger_callbacks();
+                    next_promise_state->callbacks.swap(callbacks);
                 }
+                
+                next_promise_state->trigger_callbacks(callbacks);
             };
 
             static_assert(std::is_invocable_v<Executor, decltype(callback)>, "Executor must be invocable with callback");
 
-            std::unique_lock<std::mutex> lock(state_->mtx);
-            if (state_->state != PromiseState::PENDING) {
-                (*executor_)(std::move(callback));
+            std::lock_guard<std::mutex> lock(_state->mtx);
+            if (_state->state != PromiseState::PENDING) {
+                _state->executor(std::move(callback));
             } else {
-                state_->callbacks.push_back([executor = std::move(executor_), callback = std::move(callback)]() mutable {
-                    (*executor)(std::move(callback));
-                });
+                _state->callbacks.emplace_back(std::move(callback));
             }
 
             return next_promise;
-        }
+        }        
     }
 
     template<typename FulfilledFn>
     inline auto then (FulfilledFn onFulfilled) {
-        if constexpr (std::is_void_v<T>) {
-            using RetType = std::invoke_result_t<FulfilledFn>;
-            return then(std::forward<FulfilledFn>(onFulfilled), [] (auto e) -> RetType {
-                std::rethrow_exception(e);
-            });
-        } else {
-            using RetType = std::invoke_result_t<FulfilledFn, T>;
-            return then(std::forward<FulfilledFn>(onFulfilled), [] (auto e) -> RetType {
-                std::rethrow_exception(e);
-            });
-        }
+        return then(std::forward<FulfilledFn>(onFulfilled), [] (auto e) {
+            std::rethrow_exception(e);
+        });
     }
 
     template<typename RejectedFn>
-    inline auto catch_err(RejectedFn onRejected) -> std::shared_ptr<Promise<T, Executor>> {
-        static_assert(std::is_invocable_r_v<T, RejectedFn, std::exception_ptr>, "RejectedFn must be invocable with std::exception_ptr, and return T");
-        if constexpr (std::is_void_v<T>) {
-            return then([] {}, std::forward(onRejected));
-        } else {
-            return then([] (T v) {
-                return v;
-            }, std::forward<RejectedFn>(onRejected));
-        }
+    inline auto catch_err(RejectedFn onRejected) {
+        return then([] (const T& v) { return v; }, std::forward<RejectedFn>(onRejected));
     }
 
     template<typename F>
-    inline auto finally(F onFinally) -> std::shared_ptr<Promise<void, Executor>> {
-        if constexpr (std::is_void_v<T>) {
-            auto onFulfilled = [onFinally]() { onFinally(); };
-            auto onRejected = [onFinally](std::exception_ptr) { onFinally(); };
-            return then(std::move(onFulfilled), std::move(onRejected));
-        } else {
-            auto onFulfilled = [onFinally](T) { onFinally(); };
-            auto onRejected = [onFinally](std::exception_ptr) { onFinally(); };
-            return then(std::move(onFulfilled), std::move(onRejected));
-        }
+    inline auto finally(F onFinally) {
+        return then(
+            [onFinally](const T& v) {
+                onFinally();
+                return v;
+            },
+            [onFinally](std::exception_ptr e) {
+                onFinally();
+                std::rethrow_exception(e);
+            }
+        );
     }
 
-    template<typename U = T, typename = std::enable_if_t<not std::is_void_v<U>>>
-    static auto resolve(U v, std::shared_ptr<Executor> executor)
-        -> std::shared_ptr<Promise<U, Executor>> {
-        auto state = std::make_shared<SharedState<U>>();
-        auto promise = std::shared_ptr<Promise<U, Executor>>(new Promise<U, Executor>(state, executor));
+    template<typename U = T>
+    static auto resolve(U v, Executor executor)
+        -> std::enable_if_t<!std::is_void_v<U>, Promise<U, Executor>> {
+        auto state = std::make_shared<SharedState<U, Executor>>(std::forward<Executor>(executor));
+        auto promise = Promise<U, Executor>(state);
 
+        state->executor = std::move(executor);
         state->state = PromiseState::FULFILLED;
         state->value = std::move(v);
 
         return promise;
     }
 
-    template<typename U = T, typename = std::enable_if_t<not std::is_void_v<U>>>
-    static auto reject(std::exception_ptr exception, std::shared_ptr<Executor> executor)
-        -> std::shared_ptr<Promise<U, Executor>> {
-        auto state = std::make_shared<SharedState<U>>();
-        auto promise = std::shared_ptr<Promise<U, Executor>>(new Promise<U, Executor>(state, executor));
+    template<typename U = T>
+    static auto resolve(Executor executor)
+        -> std::enable_if_t<std::is_void_v<U>, Promise<U, Executor>> {
+        auto state = std::make_shared<SharedState<U, Executor>>(std::forward<Executor>(executor));
+        auto promise = Promise<U, Executor>(state);
 
+        state->executor = std::move(executor);
+        state->state = PromiseState::FULFILLED;
+
+        return promise;
+    }
+
+    static auto reject(std::exception e, Executor executor) {
+        auto state = std::make_shared<SharedState<T, Executor>>(std::forward<Executor>(executor));
+        auto promise = Promise<T, Executor>(state);
+
+        state->executor = std::move(executor);
         state->state = PromiseState::REJECTED;
-        state->exception = std::move(exception);
+        state->exception = std::make_exception_ptr(std::move(e));
 
         return promise;
     }
 };
 
-template<typename T>
+}
+
+template<typename T, typename Executor>
+using Promise = internal::Promise<T, Executor>;
+
+template<typename T, typename Executor>
 struct UsePromise {
+    template<typename Task>
+    inline auto operator()(Task task, Executor executor = Executor()) {
+        return Promise<T, Executor>(std::forward<Task>(task), std::forward<Executor>(executor));
+    }
+};
+
+
+template<typename T>
+struct UsePromise<T, void> {
     template<typename Task, typename Executor>
-    inline auto operator()(Task task, std::shared_ptr<Executor> executor = std::make_shared<Executor>()) -> std::shared_ptr<Promise<T, Executor>> {
-        return std::make_shared<Promise<T, Executor>>(std::forward<Task>(task), std::move(executor));
+    inline auto operator()(Task task, Executor executor) {
+        return Promise<T, Executor>(std::forward<Task>(task), std::forward<Executor>(executor));
     }
 };
 
-template<typename T>
+template<typename T, typename Executor>
 struct UseResolve {
-    static_assert(not std::is_void_v<T>, "T must not be void when using resolve");
-    template<typename Executor>
-    inline auto operator()(T v, std::shared_ptr<Executor> executor = std::make_shared<Executor>()) -> std::shared_ptr<Promise<T, Executor>> {
-        return Promise<T, Executor>::resolve(std::forward<T>(v), std::move(executor));
+    template<typename U = T>
+    inline auto operator()(T v, Executor executor = Executor())
+        -> std::enable_if_t<!std::is_void_v<U>, Promise<T, Executor>> {
+        return Promise<T, Executor>::resolve(std::forward<T>(v), std::forward<Executor>(executor));
+    }
+
+    template<typename U = T>
+    inline auto operator()(Executor executor = Executor())
+        -> std::enable_if_t<std::is_void_v<U>, Promise<T, Executor>> {
+        return Promise<T, Executor>::resolve(std::forward<Executor>(executor));
     }
 };
 
 template<typename T>
+struct UseResolve<T, void> {
+    template<typename Executor, typename U = T>
+    inline auto operator()(T v, Executor executor)
+        -> std::enable_if_t<!std::is_void_v<U>, Promise<T, Executor>> {
+        return Promise<T, Executor>::resolve(std::forward<T>(v), std::forward<Executor>(executor));
+    }
+
+    template<typename U = T, typename Executor>
+    inline auto operator()(Executor executor)
+        -> std::enable_if_t<std::is_void_v<U>, Promise<T, Executor>> {
+        return Promise<T, Executor>::resolve(std::forward<Executor>(executor));
+    }
+};
+
+template<typename T, typename Executor>
 struct UseReject {
-    static_assert(not std::is_void_v<T>, "T must not be void when using reject");
-    template<typename Executor>
-    inline auto operator()(std::exception_ptr exception, std::shared_ptr<Executor> executor = std::make_shared<Executor>()) -> std::shared_ptr<Promise<T, Executor>> {
-        return Promise<T, Executor>::reject(std::move(exception), std::move(executor));
+    template<typename E>
+    inline auto operator()(E e, Executor executor = Executor()) {
+        return Promise<T, Executor>::reject(
+            std::forward<E>(e),
+            std::forward<Executor>(executor)
+        );
     }
 };
 
 template<typename T>
-UsePromise<T> usePromise = {};
+struct UseReject<T, void> {
+    template<typename E, typename Executor>
+    inline auto operator()(E e, Executor executor) {
+        return Promise<T, Executor>::reject(
+            std::forward<E>(e),
+            std::forward<Executor>(executor)
+        );
+    }
+};
 
+template<typename T, typename Executor>
+UsePromise<T, Executor> usePromiseEx = {};
 template<typename T>
-UseResolve<T> useResolve = {};
+UsePromise<T, void> usePromise = {};
 
+template<typename T, typename Executor>
+UseResolve<T, Executor> useResolveEx = {};
 template<typename T>
-UseReject<T> useReject = {};
+UseResolve<T, void> useResolve = {};
+
+template<typename T, typename Executor>
+UseReject<T, Executor> useRejectEx = {};
+template<typename T>
+UseReject<T, void> useReject = {};
 
 }

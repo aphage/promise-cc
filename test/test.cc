@@ -1,7 +1,5 @@
 #include <exception>
 #include <future>
-#include <memory>
-#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -22,6 +20,7 @@
 using promise::usePromise;
 using promise::useResolve;
 using promise::useReject;
+using promise::usePromiseEx;
 
 TEST_CASE("Sample test") {
     REQUIRE(1 + 1 == 2);
@@ -45,42 +44,42 @@ TEST_CASE("Promise") {
     std::promise<int> p;
     auto f = p.get_future();
 
-    usePromise<int>([](auto resolve, auto reject) {
-        resolve(42);
-    }, std::make_shared<ExecutorAsync>())->then([&](auto v) -> int {
+    usePromise<int>(
+        [](auto resolve, auto reject) {
+            resolve(42);
+        },
+        ExecutorAsync()
+    ).then([&](auto v) -> int {
         SPDLOG_INFO("resolved with {}", v);
 
         return v * 2;
-    })->then([&](auto v) -> std::optional<int> {
+    }).then([&](auto v) {
         SPDLOG_INFO("resolved with {}", v);
 
         p.set_value(v);
-
-        return std::nullopt;
-    })->then([&](auto v) {
-        SPDLOG_INFO("resolved with {}", v);
+        return true;
     });
 
     REQUIRE(f.get() == 42 * 2);
 }
 
 TEST_CASE("Promise2") {
-    std::promise<int> p;
+    std::promise<std::string> p;
     auto f = p.get_future();
 
-    usePromise<int>([](auto resolve, auto reject) {
-        resolve(42);
-    }, std::make_shared<ExecutorSync>())->then([&](auto v) {
-        SPDLOG_INFO("resolved with {}", v);
-
-        return v * 2;
-    })->then([&](auto v) {
+    usePromise<std::string>(
+        [](auto resolve, auto reject) {
+            resolve("hello");
+        }, 
+        ExecutorSync()
+    ).then([&](const auto& v) {
         SPDLOG_INFO("resolved with {}", v);
 
         p.set_value(v);
+        return true;
     });
 
-    REQUIRE(f.get() == 42 * 2);
+    REQUIRE(f.get() == "hello");
 }
 
 TEST_CASE("catch") {
@@ -89,53 +88,74 @@ TEST_CASE("catch") {
     auto f = p.get_future();
     std::string s = "hello";
 
-    auto executor = new auto([s] (std::function<void()> f) { f(); });
+    auto executor = [s] (std::function<void()> f) { f(); };
 
     usePromise<int>(
         [](auto resolve, auto reject) {
             throw std::runtime_error("error");
         },
-        std::shared_ptr<std::remove_pointer_t<decltype(executor)>>(executor)
-    )->then([&](const auto& v) {
-        SPDLOG_INFO("resolved with {}", v);
-
-        return v * 2;
-    })->catch_err([](auto e) {
+        executor
+    ).catch_err([](auto e) {
         SPDLOG_INFO("rejected with {}", e.what());
 
         // resume
         return 42 * 2;
-    })->then([&](auto v) {
+    }).then([&](auto v) {
         SPDLOG_INFO("resolved with {}", v);
 
         p.set_value(v);
+        return true;
     });
 
     REQUIRE(f.get() == 42 * 2);
+}
+
+TEST_CASE("finally") {
+    std::promise<int> p;
+    auto f = p.get_future();
+
+    usePromise<int>(
+        [](auto resolve, auto reject) {
+            resolve(42);
+        },
+        ExecutorSync()
+    ).finally([] {
+        SPDLOG_INFO("finally");
+    }).then([&](auto v) {
+        SPDLOG_INFO("resolved with {}", v);
+
+        p.set_value(v);
+        return true;
+    });
+
+    REQUIRE(f.get() == 42);
 }
 
 TEST_CASE("resolve") {
     std::promise<int> p;
     auto f = p.get_future();
 
-    useResolve<int>(42, std::make_shared<ExecutorSync>())->then([&](auto v) {
+    useResolve<int>(
+        42,
+        ExecutorSync()
+    ).then([&](auto v) {
         SPDLOG_INFO("resolved with {}", v);
 
         return v * 2;
-    })->then([&](auto v) {
+    }).then([&](auto v) {
         SPDLOG_INFO("resolved with {}", v);
 
         p.set_value(v);
-    }, [&] (auto e) {
+        return true;
+    }, [&] (auto e) -> bool {
         SPDLOG_INFO("rejected with {}", e.what());
         std::rethrow_exception(e);
-    })->then([]() {
-
-    })->then([&]() {
+    }).then([&](auto v) {
         
         return std::string("hello");
-    })->then([&](auto v) {
+    }).then([&](auto v) {
         SPDLOG_INFO("resolved with {}", v);
+        return true;
     });
 
     REQUIRE(f.get() == 42 * 2);
@@ -147,20 +167,38 @@ TEST_CASE("reject") {
 
     auto v = 42;
 
-    useReject<int>(std::make_exception_ptr(std::runtime_error("error")),
-        std::make_shared<ExecutorSync>())
-    ->catch_err([&](auto e) -> int {
+    useReject<int>(
+        std::runtime_error("error"),
+        ExecutorSync()
+    ).catch_err([&](auto e) -> int {
 
         // resume
         return v * 2;
-    })->then([&](auto v) {
+    }).then([&](auto v) {
         SPDLOG_INFO("resolved with {}", v);
 
         p.set_value(v);
-    }, [&] (auto e) {
+        return true;
+    }, [&] (auto e) -> bool {
         SPDLOG_INFO("rejected with {}", e.what());
         std::rethrow_exception(e);
     });
 
     REQUIRE(f.get() == 42 * 2);
+}
+
+TEST_CASE("promise void") {
+    std::promise<void> p;
+    auto f = p.get_future();
+
+    usePromiseEx<void, ExecutorAsync>(
+        [](auto resolve, auto reject) {
+            resolve();
+        }
+    ).then([&]() {
+        SPDLOG_INFO("resolved with {}", v);
+        p.set_value();
+    });
+
+    f.get();
 }
