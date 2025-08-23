@@ -35,7 +35,7 @@ using promise::usePromise;
 
 usePromise<int>([](auto resolve, auto reject) {
     resolve(42);
-}, std::make_shared<ExecutorAsync>())->then([&](auto v) -> int {
+}, ExecutorAsync())->then([&](auto v) -> int {
     SPDLOG_INFO("resolved with {}", v);
 
     return v * 2;
