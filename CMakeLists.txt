@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(PROMISE_CC_BUILD_TESTS "Build tests" OFF)
 
 project(promise-cc
-VERSION 0.0.3
+VERSION 0.0.4
 DESCRIPTION "C++ promise, like JavaScript"
 LANGUAGES C CXX
 )

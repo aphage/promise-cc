@@ -179,8 +179,11 @@ public:
                         if constexpr (std::is_void_v<RejType>) {
                             onRejected(*state->exception);
 
-                            //When RejectedFn returns void, you need to throw an exception
-                            throw std::runtime_error("When RejectedFn returns void, you need to throw an exception");
+                            // If RejectedFn returns void and next value expect not void
+                            if constexpr (!std::is_void_v<NextT>) {
+                                //Oops!, this will never happen
+                                throw std::runtime_error("Oops!, RejectedFn returns void and next value expect not void");
+                            }
                         } else {
                             static_assert(std::is_same_v<NextT, RejType>, "FulfilledFn and RejectedFn must be the same type");
                             NextT value = onRejected(*state->exception);
@@ -241,8 +244,11 @@ public:
                         if constexpr (std::is_void_v<RejType>) {
                             onRejected(*state->exception);
 
-                            //When RejectedFn returns void, you need to throw an exception
-                            throw std::runtime_error("When RejectedFn returns void, you need to throw an exception");
+                            // If RejectedFn returns void and next value expect not void
+                            if constexpr (!std::is_void_v<NextT>) {
+                                //Oops!, this will never happen
+                                throw std::runtime_error("Oops!, RejectedFn returns void and next value expect not void");
+                            }
                         } else {
                             static_assert(std::is_same_v<NextT, RejType>, "FulfilledFn and RejectedFn must be the same type");
                             NextT value = onRejected(*state->exception);
@@ -273,7 +279,7 @@ public:
             }
 
             return next_promise;
-        }        
+        }
     }
 
     template<typename FulfilledFn>
