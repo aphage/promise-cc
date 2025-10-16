@@ -14,6 +14,31 @@ namespace promise {
 
 namespace internal {
 
+template<typename T, typename Executor>
+class Promise;
+
+template<typename T>
+struct is_promise : std::false_type {};
+
+template<typename T, typename Executor>
+struct is_promise<Promise<T, Executor>> : std::true_type {};
+
+template<typename T>
+constexpr bool is_promise_v = is_promise<T>::value;
+
+template<typename T>
+struct promise_value_type;
+
+template<typename T, typename Executor>
+struct promise_value_type<Promise<T, Executor>> {
+    using type = T;
+    using executor_type = Executor;
+};
+
+template<typename T>
+using promise_value_type_t = typename promise_value_type<T>::type;
+
+
 enum class PromiseState {
     PENDING,
     FULFILLED,

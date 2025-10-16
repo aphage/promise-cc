@@ -202,3 +202,13 @@ TEST_CASE("promise void") {
 
     f.get();
 }
+
+TEST_CASE("is_promise") {
+    auto v = usePromiseEx<void, ExecutorAsync>(
+        [](auto resolve, auto reject) {
+            resolve();
+        }
+    );
+    static_assert(promise::internal::is_promise_v<decltype(v)>);
+    static_assert(!promise::internal::is_promise_v<int>);
+}
